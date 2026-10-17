@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { getOverview, askQuestion } from "../api.js";
 import FileTree from "./FileTree.jsx";
 import Results from "./Results.jsx";
+import Screenshot from "./Screenshot.jsx";
 
 const EXAMPLES = [
   "How does the login system work?",
@@ -137,6 +138,7 @@ export default function Dashboard({ repo, onReset }) {
             {ask?.data && <Results data={ask.data} />}
           </div>
         </section>
+        <Screenshot id={repo.repository_id} />
       </main>
     </div>
   );
