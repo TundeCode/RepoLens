@@ -4,8 +4,12 @@ import uuid
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
+from . import gemma, prompts
 from .indexer import Repository, UnsafeArchiveError, index_zip
+from .ranking import (build_context, overview_context, rank_files, repo_index,
+                      validate_paths, validate_recs)
 
 load_dotenv()
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "50")) * 1024 * 1024
@@ -18,6 +22,7 @@ app.add_middleware(
 )
 
 REPOS: dict[str, Repository] = {}  # in-memory sessions
+OVERVIEWS: dict[str, dict] = {}
 
 
 def get_repo(repository_id: str) -> Repository:
@@ -52,3 +57,57 @@ async def upload(file: UploadFile = File(...)):
 def get_repository(repository_id: str):
     repo = get_repo(repository_id)
     return {"repository_id": repository_id, **repo.metadata(), "tree": repo.tree()}
+
+
+class AskRequest(BaseModel):
+    question: str = Field(min_length=3, max_length=1000)
+
+
+def call_model(prompt: str) -> dict:
+    try:
+        return gemma.generate_json(prompt)
+    except gemma.GemmaError as e:
+        raise HTTPException(e.status, str(e))
+
+
+@app.get("/api/repositories/{repository_id}/overview")
+def overview(repository_id: str):
+    repo = get_repo(repository_id)
+    if repository_id in OVERVIEWS:
+        return OVERVIEWS[repository_id]
+    raw = call_model(prompts.OVERVIEW.format(
+        rules=prompts.RULES, index=repo_index(repo), context=overview_context(repo)))
+    key_files, dropped = validate_recs(repo, [{"path": k.get("path"), "reason": k.get("why")}
+                                              for k in raw.get("key_files", []) if isinstance(k, dict)])
+    entry, bad_entry = validate_paths(repo, raw.get("entry_points", []))
+    result = {
+        "purpose": raw.get("purpose", ""), "languages": raw.get("languages", []),
+        "frameworks": raw.get("frameworks", []), "architecture": raw.get("architecture", ""),
+        "key_files": [{"path": k["path"], "why": k["reason"]} for k in key_files],
+        "entry_points": entry, "component_interactions": raw.get("component_interactions", ""),
+        "start_here": raw.get("start_here", []), "unknowns": raw.get("unknowns", []),
+        "removed_unverified_paths": dropped + bad_entry,
+        "disclaimer": "AI-generated from repository contents; verify before relying on it.",
+    }
+    OVERVIEWS[repository_id] = result
+    return result
+
+
+@app.post("/api/repositories/{repository_id}/ask")
+def ask(repository_id: str, body: AskRequest):
+    repo = get_repo(repository_id)
+    candidates = rank_files(repo, body.question)
+    raw = call_model(prompts.ASK.format(
+        rules=prompts.RULES, question=body.question, index=repo_index(repo),
+        context=build_context(candidates)))
+    files, dropped = validate_recs(repo, raw.get("files", []))
+    order, bad_order = validate_paths(repo, raw.get("exploration_order", []))
+    related, bad_rel = validate_paths(repo, raw.get("related_to_inspect", []))
+    return {
+        "question": body.question, "summary": raw.get("summary", ""), "files": files,
+        "exploration_order": order, "related_to_inspect": related,
+        "caveats": raw.get("caveats", []),
+        "removed_unverified_paths": dropped + bad_order + bad_rel,
+        "files_considered": [f.path for f in candidates],
+        "disclaimer": "AI-generated from repository contents; verify before relying on it.",
+    }
