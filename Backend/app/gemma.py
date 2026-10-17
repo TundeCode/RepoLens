@@ -30,14 +30,16 @@ def parse_json(text: str) -> dict:
     return data
 
 
-def generate_text(prompt: str) -> str:
+def generate_text(prompt: str, image: tuple[bytes, str] | None = None) -> str:
     key = os.getenv("GEMINI_API_KEY")
     if not key:
         raise GemmaError("GEMINI_API_KEY is not set on the server", 503)
     from google import genai
+    from google.genai import types
     try:
         client = genai.Client(api_key=key)
-        resp = client.models.generate_content(model=model_name(), contents=prompt)
+        contents = [types.Part.from_bytes(data=image[0], mime_type=image[1]), prompt] if image else prompt
+        resp = client.models.generate_content(model=model_name(), contents=contents)
         return resp.text or ""
     except GemmaError:
         raise
@@ -48,10 +50,10 @@ def generate_text(prompt: str) -> str:
         raise GemmaError(f"Model request failed: {e}", 502)
 
 
-def generate_json(prompt: str) -> dict:
+def generate_json(prompt: str, image: tuple[bytes, str] | None = None) -> dict:
     """Prompt-level JSON (not API JSON mode, which Gemma may not support); one retry on bad output."""
     for attempt in range(2):
-        text = generate_text(prompt if attempt == 0 else prompt + "\n\nReturn ONLY valid JSON.")
+        text = generate_text(prompt if attempt == 0 else prompt + "\n\nReturn ONLY valid JSON.", image)
         try:
             return parse_json(text)
         except ValueError:

@@ -105,7 +105,7 @@ def validate_paths(repo: Repository, paths: list) -> tuple[list[str], list[str]]
     return ok, bad
 
 
-def validate_recs(repo: Repository, recs: list, snippet_lines: int = 40) -> tuple[list[dict], list[str]]:
+def validate_recs(repo: Repository, recs: list, snippet_lines: int = 40, extra: tuple = ()) -> tuple[list[dict], list[str]]:
     valid, dropped = [], []
     for r in recs if isinstance(recs, list) else []:
         if not isinstance(r, dict):
@@ -123,5 +123,33 @@ def validate_recs(repo: Repository, recs: list, snippet_lines: int = 40) -> tupl
         else:
             s = e = None
         valid.append({"path": path, "reason": str(r.get("reason", "")), "start_line": s,
-                      "end_line": e, "snippet": snippet})
+                      "end_line": e, "snippet": snippet,
+                      **{k: r.get(k) for k in extra}})
     return valid, dropped
+
+
+# ---- screenshot matching ----
+UI_EXTS = {".jsx", ".tsx", ".vue", ".svelte", ".html", ".css", ".scss", ".js", ".ts"}
+UI_HINTS = ("component", "page", "view", "screen", "template", "route", "layout", "style", "css", "public", "static")
+
+
+def rank_ui_files(repo: Repository, visible_text: list[str], keywords: str, limit: int = 8) -> list[RepoFile]:
+    """Rank UI files using text read from the screenshot (strong signal) plus keywords."""
+    terms = expand(tokenize(keywords))
+    phrases = [t.strip().lower() for t in visible_text if len(t.strip()) >= 3]
+    scored = []
+    for f in repo.files.values():
+        ext = posixpath.splitext(f.path)[1].lower()
+        s = score_file(f, terms) if terms else 0
+        if ext in UI_EXTS:
+            s += 2
+        if any(h in f.path.lower() for h in UI_HINTS):
+            s += 2
+        body = f.content.lower()
+        s += 6 * sum(1 for p in phrases if p in body)
+        scored.append((s, f.path))
+    scored.sort(reverse=True)
+    picked = [repo.files[p] for s, p in scored if s > 4][:limit]
+    if not picked:
+        picked = [f for f in repo.files.values() if posixpath.splitext(f.path)[1].lower() in UI_EXTS][:limit]
+    return picked
